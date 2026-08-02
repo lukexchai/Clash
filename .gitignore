@@ -1,0 +1,14 @@
+# 配置文件（从 ~/Mihomo/ 自动获取，不同电脑不同）
+config.yaml
+
+# 运行时数据
+*.pid
+*.log
+cache.db
+
+# 代理节点缓存（含订阅链接和节点信息）
+proxy_provider/
+rules/
+
+# macOS 系统文件
+.DS_Store
