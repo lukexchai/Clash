@@ -1,74 +1,57 @@
 #!/bin/zsh
 # ═══════════════════════════════════════════════════════════
-#   ███╗   ███╗██╗██╗  ██╗ ██████╗ ███╗   ███╗ ██████╗
-#   ████╗ ████║██║██║  ██║██╔═══██╗████╗ ████║██╔═══██╗
-#   ██╔████╔██║██║███████║██║   ██║██╔████╔██║██║   ██║
-#   ██║╚██╔╝██║██║██╔══██║██║   ██║██║╚██╔╝██║██║   ██║
-#   ██║ ╚═╝ ██║██║██║  ██║╚██████╔╝██║ ╚═╝ ██║╚██████╔╝
-#   ╚═╝     ╚═╝╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝ ╚═════╝
-#
-#   Mihomo Kernel Manager  ─  macOS 终端管理脚本
-#   无参数进入交互菜单  |  clash start/stop/status ...
+#   Mihomo Kernel Manager — macOS
+#   clash <command>   |   clash 进入交互菜单   |   clash help
 # ═══════════════════════════════════════════════════════════
 
 CONFIG_DIR="${HOME}/.config/mihomo"
 CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 PID_FILE="${CONFIG_DIR}/mihomo.pid"
 LOG_FILE="${CONFIG_DIR}/mihomo.log"
-LINK_FILE="${CONFIG_DIR}/source.txt"   # 记录源 YAML 路径
+LINK_FILE="${CONFIG_DIR}/source.txt"     # 源 YAML 路径
+SOURCE_DIR="${HOME}/Mihomo"              # 源配置目录（自动检测最新 YAML）
 MIXED_PORT="7890"
 API_PORT="9090"
 MIHOMO_BIN="/opt/homebrew/bin/mihomo"
 
-# ========== 源配置目录（自动检测最新的 YAML）==========
-# 把你的 YAML 文件丢到这个目录下，启动时自动找最新的那个
-# 可通过 `clash link /path/to/file.yaml` 固定指向某个文件
-SOURCE_DIR="${HOME}/Mihomo"
-SOURCE_CONFIG=""  # 由 auto_detect_source 自动填充
-
 [[ -d "$CONFIG_DIR" ]] || mkdir -p "$CONFIG_DIR"
 
-# ========== 颜色 ==========
-BOLD='\033[1m'
-DIM='\033[2m'
-GREEN='\033[0;32m'
-BOLD_GREEN='\033[1;32m'
-RED='\033[0;31m'
-BOLD_RED='\033[1;31m'
-YELLOW='\033[0;33m'
-BOLD_YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD_BLUE='\033[1;34m'
-PURPLE='\033[0;35m'
-BOLD_PURPLE='\033[1;35m'
-CYAN='\033[0;36m'
-BOLD_CYAN='\033[1;36m'
+# ─── 颜色 ───
+BOLD='\033[1m'; DIM='\033[2m'
+GREEN='\033[0;32m'; BOLD_GREEN='\033[1;32m'
+RED='\033[0;31m'; BOLD_RED='\033[1;31m'
+YELLOW='\033[0;33m'; BOLD_YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; BOLD_BLUE='\033[1;34m'
+PURPLE='\033[0;35m'; BOLD_PURPLE='\033[1;35m'
+CYAN='\033[0;36m'; BOLD_CYAN='\033[1;36m'
 WHITE='\033[1;37m'
-NC='\033[0m' # No Color
-
-# ─── 辅助符号 ───
-ICON_OK="${GREEN}✓${NC}"
-ICON_FAIL="${RED}✗${NC}"
-ICON_WARN="${YELLOW}⚠${NC}"
-ICON_INFO="${BLUE}ℹ${NC}"
-ICON_STOP="${RED}■${NC}"
-ICON_START="${GREEN}▶${NC}"
+NC='\033[0m'
 SEP="${DIM}──────────────────────────────────────────${NC}"
 
-# ========== 自动检测源文件 ==========
-# 优先级：link > SOURCE_DIR 下最新的 .yaml > 报错
+# ─── 输出辅助 ───
+info()  { echo "  ${CYAN}ℹ${NC} $*"; }
+ok()    { echo "  ${GREEN}✓${NC} $*"; }
+warn()  { echo "  ${YELLOW}⚠${NC} $*"; }
+err()   { echo "  ${RED}✗${NC} $*"; }
+dim()   { echo "  ${DIM}$*${NC}"; }
+section(){ echo ""; echo "  ${BOLD}── $* ──${NC}"; }
+
+# ─── 运行状态 ───
+is_running() {
+    [[ -f "$PID_FILE" ]] && pgrep -F "$PID_FILE" &>/dev/null
+}
+
+# ========== 源文件自动检测 ==========
+# 优先级：link 固定路径 > SOURCE_DIR 最新 .yaml/.yml
 auto_detect_source() {
-    # 如果用户通过 clash link 固定了路径
     if [[ -f "$LINK_FILE" ]]; then
         local linked=$(cat "$LINK_FILE")
         if [[ -f "$linked" ]]; then
             echo "$linked"
             return 0
         fi
-        echo "${YELLOW}[!] 链接文件不存在: $linked，尝试自动检测...${NC}" >&2
+        warn "链接文件不存在: $linked，尝试自动检测..."
     fi
-
-    # 从 SOURCE_DIR 找最新的 .yaml 文件
     if [[ -d "$SOURCE_DIR" ]]; then
         local latest=$(ls -t "$SOURCE_DIR"/*.yaml(N) "$SOURCE_DIR"/*.yml(N) 2>/dev/null | head -1)
         if [[ -n "$latest" && -f "$latest" ]]; then
@@ -76,263 +59,320 @@ auto_detect_source() {
             return 0
         fi
     fi
-
     return 1
 }
 
-# ========== macOS 适配：不修改源文件，复制并做兼容转换 ==========
-# 在 OpenWRT/Nikki 上直接使用原始文件，macOS 上启动前调用此函数
+# ========== macOS 适配：复制源文件并做兼容转换（不改原件）==========
 macos_adapt_config() {
     local src="${1:-}"
-
-    # 没传参 → 自动检测
     if [[ -z "$src" ]]; then
         src=$(auto_detect_source)
     fi
-
     if [[ -z "$src" || ! -f "$src" ]]; then
-        echo "${RED}[!] 未找到 YAML 配置文件${NC}"
-        echo "    请把 .yaml 文件放到 ${CYAN}$SOURCE_DIR${NC} 目录下"
-        echo "    或用 ${CYAN}clash link /path/to/file.yaml${NC} 指定"
+        err "未找到 YAML 配置文件"
+        dim "请把 .yaml 放到 $SOURCE_DIR，或用: clash link /path/to/file.yaml"
         return 1
     fi
 
-    echo ""
-    echo -n "  ${ICON_INFO} 正在适配 macOS ... "
-
-    # 复制源文件（不修改原件）
+    echo -n "  适配 macOS 配置 ... "
     cp "$src" "$CONFIG_FILE"
 
-    # ---- macOS 兼容性修复 ----
-    # 1) device: nikki → OpenWRT 专用，macOS 不支持
+    # macOS 兼容修复
     sed -i '' '/^[[:space:]]*device: nikki[[:space:]]*$/d' "$CONFIG_FILE"
     sed -i '' '/^[[:space:]]*device: nikki$/d' "$CONFIG_FILE"
-
-    # 2) tun.stack: system → macOS 推荐用 gvisor
     sed -i '' 's/^\([[:space:]]*stack:\) system/\1 gvisor/' "$CONFIG_FILE"
-
-    # 3) auto-redirect: true → macOS 不支持
     sed -i '' '/^[[:space:]]*auto-redirect: true/d' "$CONFIG_FILE"
-
-    # 4) dns-hijack 中的 tcp:// / udp:// 前缀 → macOS mihomo 不支持
     sed -i '' 's/  - tcp:\/\//  - /g' "$CONFIG_FILE"
     sed -i '' 's/  - udp:\/\//  - /g' "$CONFIG_FILE"
 
-    echo "${BOLD_GREEN}完成${NC}"
-    echo "  $SEP"
-    printf "  ${DIM}%-12s${NC} ${CYAN}%s${NC}\n" "源文件" "$src"
-    printf "  ${DIM}%-12s${NC} ${CYAN}%s${NC}\n" "适配后" "$CONFIG_FILE"
-    echo "  $SEP"
+    ok "完成"
+    dim "源文件   $src"
+    dim "适配后   $CONFIG_FILE"
     return 0
 }
 
-# ========== 状态指示 ==========
-is_running() {
-    [[ -f "$PID_FILE" ]] && pgrep -F "$PID_FILE" &>/dev/null
-}
-
-status_tag() {
-    if is_running; then
-        echo "${GREEN}● 运行中${NC} (pid: $(cat $PID_FILE))"
-    else
-        echo "${RED}○ 未运行${NC}"
-    fi
-}
-
-# ========== 启动（自动适配 macOS）==========
-clash_start() {
-    local src="${1:-}"
-    local do_adapt=true
-
-    # 如果传了参数且文件已存在 CONFIG_DIR 下，说明是已适配过的配置，不再重复适配
-    if [[ -n "$src" ]]; then
-        if [[ "$src" == "$CONFIG_FILE" ]] || [[ "$src" == "$(cat "$LINK_FILE" 2>/dev/null)" ]]; then
-            do_adapt=false
+# ========== 管理面板 ==========
+# /ui 下可能有多个面板子目录（如 zashboard），自动定位并生成首页跳转
+ui_url() {
+    local ui_dir="$CONFIG_DIR/ui"
+    if [[ -d "$ui_dir" ]]; then
+        local dash
+        dash=$(find "$ui_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | head -1)
+        if [[ -n "$dash" ]]; then
+            echo "http://127.0.0.1:${API_PORT}/ui/$(basename "$dash")/"
+            return 0
         fi
     fi
+    echo "http://127.0.0.1:${API_PORT}/ui"
+}
 
-    # 无参数：自动检测源文件
-    if [[ -z "$src" ]]; then
-        src=$(auto_detect_source)
-    fi
-
-    # 如果源文件和当前配置不同，则做适配
-    if $do_adapt && [[ "$src" != "$CONFIG_FILE" ]]; then
-        macos_adapt_config "$src" || return 1
-    elif [[ ! -f "$CONFIG_FILE" ]]; then
-        echo "${RED}[!] 配置文件不存在: $CONFIG_FILE${NC}"
-        echo "    试试: clash link /path/to/your.yaml"
-        return 1
-    fi
-
-    if is_running; then
-        echo "${YELLOW}[!] mihomo 已经在运行了${NC}"
-        return 0
-    fi
-
-    echo ""
-    echo -n "  ${ICON_START} 启动中 ... "
-    nohup sudo "$MIHOMO_BIN" -d "$CONFIG_DIR" -f "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
-    echo $! > "$PID_FILE"
-    sleep 1
-    if is_running; then
-        echo "${BOLD_GREEN}已就绪${NC}"
-        echo ""
-        echo "  $SEP"
-        printf "  ${DIM}%-14s${NC} ${CYAN}127.0.0.1:${MIXED_PORT}${NC}  ${DIM}(HTTP/SOCKS5)${NC}\n" "代理端口"
-        printf "  ${DIM}%-14s${NC} ${CYAN}127.0.0.1:${API_PORT}${NC}\n" "API 控制"
-        printf "  ${DIM}%-14s${NC} ${CYAN}http://127.0.0.1:${API_PORT}/ui${NC}\n" "管理面板"
-        echo "  $SEP"
-        echo ""
-    else
-        echo "${BOLD_RED}失败${NC}"
-        echo "  ${DIM}查看日志: tail $LOG_FILE${NC}"
-        rm -f "$PID_FILE"
-        return 1
+ensure_ui_index() {
+    local ui_dir="$CONFIG_DIR/ui"
+    [[ -d "$ui_dir" ]] || return 0
+    local dash
+    dash=$(find "$ui_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | head -1)
+    [[ -z "$dash" ]] && return 0
+    local dash_name=$(basename "$dash")
+    local index_file="$ui_dir/index.html"
+    if [[ ! -f "$index_file" ]]; then
+        cat > "$index_file" <<EOF
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=./${dash_name}/">
+<title>Mihomo Dashboard</title>
+</head>
+<body>
+<p>正在打开面板 <a href="./${dash_name}/">${dash_name}</a> ...</p>
+</body>
+</html>
+EOF
+        info "已生成面板首页跳转: $index_file"
     fi
 }
 
-# ========== 网络健康检查 ==========
+# ========== 残留网络状态检测 ==========
+# 返回 0 = 存在 mihomo 残留进程 / 残留 TUN 劫持 / 系统代理 / DNS 劫持
+network_leftovers() {
+    pgrep -l mihomo >/dev/null 2>&1 && return 0
+
+    local dev
+    for dev in $(ifconfig -l 2>/dev/null); do
+        [[ "$dev" != utun* ]] && continue
+        local idx="${dev#utun}"
+        [[ "$idx" != <-> ]] && continue
+        if ifconfig "$dev" 2>/dev/null | grep -q "inet 198.18.0.1 "; then
+            return 0
+        fi
+        if netstat -rn -f inet 2>/dev/null | grep -qE "198\.18\.0\.1[[:space:]]+.*[[:space:]]+$dev"; then
+            return 0
+        fi
+        (( idx >= 1024 )) && return 0
+    done
+
+    local hijacked=0
+    while IFS= read -r service; do
+        local clean=$(printf '%s' "$service" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$clean" ]] && continue
+        local wp=$(networksetup -getwebproxy "$clean" 2>/dev/null)
+        local sp=$(networksetup -getsocksfirewallproxy "$clean" 2>/dev/null)
+        if echo "$wp$sp" | grep -qE "Server: 127\.0\.0\.1" && echo "$wp$sp" | grep -qE "Port: ${MIXED_PORT}"; then
+            hijacked=1
+            break
+        fi
+    done < <(networksetup -listallnetworkservices 2>/dev/null | tail -n +2)
+    [[ $hijacked -eq 1 ]] && return 0
+
+    scutil --dns 2>/dev/null | grep -qE "nameserver\[[0-9]+\].*(127\.0\.0\.1|198\.18\.)" && return 0
+    return 1
+}
+
+# ========== 网络恢复（TUN/路由/代理/DNS 全面清理）==========
+network_restore() {
+    local verbose=${1:-true}
+
+    $verbose && section "网络恢复"
+
+    # 1. 清理残留 mihomo 进程
+    if pgrep -l mihomo >/dev/null 2>&1; then
+        $verbose && warn "发现残留进程，正在清理..."
+        sudo pkill -9 mihomo 2>/dev/null
+        rm -f "$PID_FILE"
+    fi
+
+    # 2. 清理 mihomo 残留 TUN（按 fake-IP 网关 198.18.0.1 / 路由特征识别，
+    #    macOS 上 mihomo 常创建 utun7/utun8 这类低编号，不能只认 >=1024）
+    local tun_list=$(ifconfig -l 2>/dev/null)
+    local route_devs=$(netstat -rn -f inet 2>/dev/null | awk '$2=="198.18.0.1" && $4 ~ /^utun[0-9]+$/ {print $4}' | sort -u)
+    local mihomo_tuns=""
+    for dev in ${(s: :)tun_list}; do
+        [[ "$dev" != utun* ]] && continue
+        local idx="${dev#utun}"
+        [[ "$idx" != <-> ]] && continue
+        if ifconfig "$dev" 2>/dev/null | grep -q "inet 198.18.0.1 "; then
+            mihomo_tuns+=" $dev"
+            continue
+        fi
+        if [[ -n "$route_devs" ]] && echo "$route_devs" | grep -qx "$dev"; then
+            mihomo_tuns+=" $dev"
+            continue
+        fi
+        (( idx >= 1024 )) && mihomo_tuns+=" $dev"
+    done
+    for dev in ${(s: :)mihomo_tuns}; do
+        $verbose && echo -n "  清理残留 TUN $dev ... "
+        sudo route -n delete -net 0.0.0.0/1 198.18.0.1 2>/dev/null
+        sudo route -n delete -net 128.0.0.0/1 198.18.0.1 2>/dev/null
+        sudo route -n delete -net 198.18.0.0/16 198.18.0.1 2>/dev/null
+        sudo ifconfig "$dev" down 2>/dev/null
+        sudo ifconfig "$dev" destroy 2>/dev/null
+        $verbose && echo "${GREEN}✓${NC}"
+    done
+
+    # 3. 关闭系统 HTTP/HTTPS/SOCKS 代理（遍历所有网络服务）
+    while IFS= read -r service; do
+        local clean=$(printf '%s' "$service" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$clean" ]] && continue
+        local wp=$(networksetup -getwebproxy "$clean" 2>/dev/null)
+        local sp=$(networksetup -getsocksfirewallproxy "$clean" 2>/dev/null)
+        if echo "$wp$sp" | grep -qE "Server: 127\.0\.0\.1" && echo "$wp$sp" | grep -qE "Port: ${MIXED_PORT}"; then
+            $verbose && echo -n "  关闭系统代理 ($clean) ... "
+            sudo networksetup -setwebproxystate "$clean" off 2>/dev/null
+            sudo networksetup -setsecurewebproxystate "$clean" off 2>/dev/null
+            sudo networksetup -setsocksfirewallproxystate "$clean" off 2>/dev/null
+            $verbose && echo "${GREEN}✓${NC}"
+        fi
+    done < <(networksetup -listallnetworkservices 2>/dev/null | tail -n +2)
+
+    # 4. 刷新 DNS 缓存
+    $verbose && echo -n "  刷新 DNS 缓存 ... "
+    sudo dscacheutil -flushcache 2>/dev/null
+    sudo killall -HUP mDNSResponder 2>/dev/null
+    $verbose && echo "${GREEN}✓${NC}"
+
+    # 5. 还原系统 DNS（如果被 mihomo 指到 127.0.0.1 / 198.18.x）
+    if scutil --dns 2>/dev/null | grep -qE "nameserver\[[0-9]+\].*(127\.0\.0\.1|198\.18\.)"; then
+        $verbose && echo -n "  还原系统 DNS ... "
+        while IFS= read -r service; do
+            local clean=$(printf '%s' "$service" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [[ -z "$clean" ]] && continue
+            if networksetup -getdnsservers "$clean" 2>/dev/null | grep -qE "^(127\.0\.0\.1|198\.18\.)"; then
+                sudo networksetup -setdnsservers "$clean" empty 2>/dev/null
+            fi
+        done < <(networksetup -listallnetworkservices 2>/dev/null | tail -n +2)
+        sudo dscacheutil -flushcache 2>/dev/null
+        sudo killall -HUP mDNSResponder 2>/dev/null
+        $verbose && echo "${GREEN}✓${NC}"
+    fi
+
+    $verbose && echo ""
+    $verbose && ok "网络已恢复"
+}
+
+# ========== 网络诊断 ==========
 network_health_check() {
     local issues=0
-    echo "  ${BOLD}──  网络诊断  ──${NC}"
+    section "网络诊断"
 
-    # DNS 解析
-    echo -n "  ${DIM}│${NC} DNS ${DIM}........${NC} "
     if nslookup baidu.com >/dev/null 2>&1; then
-        echo "${ICON_OK} ${DIM}baidu.com${NC}"
+        ok "DNS 解析正常 (baidu.com)"
     else
-        echo "${ICON_FAIL} ${DIM}DNS 解析失败${NC}"
+        err "DNS 解析失败"
         issues=1
     fi
 
-    # 外网连通
-    echo -n "  ${DIM}│${NC} 外网 ${DIM}.......${NC} "
     if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
-        echo "${ICON_OK} ${DIM}8.8.8.8${NC}"
+        ok "外网连通 (8.8.8.8)"
     else
-        echo "${ICON_FAIL} ${DIM}外网不可达${NC}"
+        err "外网不可达"
         issues=1
     fi
 
-    # TUN 残留检查（macOS 正常有 utun0~utun6 左右）
     local tun_count=$(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -c "^utun")
     local tun_high=0
+    local dev
     for dev in $(ifconfig -l 2>/dev/null); do
         [[ "$dev" != utun* ]] && continue
         local idx="${dev#utun}"
         [[ "$idx" != <-> ]] && continue
         (( idx >= 1024 )) && (( tun_high++ ))
     done
-    echo -n "  ${DIM}│${NC} TUN ${DIM}........${NC} "
     if [[ $tun_high -eq 0 ]]; then
-        echo "${ICON_OK} ${DIM}${tun_count} 个（正常）${NC}"
+        ok "TUN 接口 ${tun_count} 个，无残留"
     else
-        echo "${ICON_WARN} ${DIM}${tun_count} 个（${tun_high} 个高编号残留）${NC}"
+        warn "TUN ${tun_count} 个（${tun_high} 个高编号残留）"
         issues=1
     fi
 
-    echo "  ${DIM}└${NC}"
     if [[ $issues -eq 1 ]]; then
-        echo "  ${YELLOW}${ICON_WARN} 网络可能有异常，试试: clash cleanup${NC}"
+        warn "网络可能有异常，试试: clash cleanup"
     else
-        echo "  ${ICON_OK} ${GREEN}网络一切正常${NC}"
+        ok "网络一切正常"
     fi
 }
 
-# ========== 网络恢复（TUN/路由/DNS/系统代理全面清理）==========
-network_restore() {
-    local verbose=${1:-true}
+# ========== 启动 ==========
+cmd_start() {
+    local src="${1:-}"
+    local do_adapt=true
 
-    $verbose && echo ""
-    $verbose && echo "  ${BOLD}──  网络恢复  ──${NC}"
+    if [[ -n "$src" ]]; then
+        if [[ "$src" == "$CONFIG_FILE" ]] || [[ "$src" == "$(cat "$LINK_FILE" 2>/dev/null)" ]]; then
+            do_adapt=false
+        fi
+    fi
+    if [[ -z "$src" ]]; then
+        src=$(auto_detect_source)
+    fi
 
-    # 1. 杀掉所有 mihomo 残留进程
-    local leftovers=$(pgrep -l mihomo 2>/dev/null)
-    if [[ -n "$leftovers" ]]; then
-        $verbose && echo "  ${ICON_WARN} 发现残留进程，正在清理..."
-        sudo pkill -9 mihomo 2>/dev/null
+    if $do_adapt && [[ "$src" != "$CONFIG_FILE" ]]; then
+        macos_adapt_config "$src" || return 1
+    elif [[ ! -f "$CONFIG_FILE" ]]; then
+        err "配置文件不存在: $CONFIG_FILE"
+        dim "试试: clash link /path/to/your.yaml"
+        return 1
+    fi
+
+    if is_running; then
+        warn "mihomo 已经在运行了"
+        return 0
+    fi
+
+    # 启动前清理上次异常退出残留（旧 TUN/路由会继续劫持全部流量）
+    if network_leftovers; then
+        echo ""
+        info "检测到上次残留网络状态，先清理 ..."
+        network_restore false
+    fi
+
+    echo ""
+    echo -n "  启动中 ... "
+    nohup sudo "$MIHOMO_BIN" -d "$CONFIG_DIR" -f "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    sleep 1
+
+    if is_running; then
+        ok "已就绪"
+        ensure_ui_index
+        echo ""
+        printf "  ${DIM}%-10s${NC} ${CYAN}127.0.0.1:${MIXED_PORT}${NC}  ${DIM}(HTTP/SOCKS5)${NC}\n" "代理端口"
+        printf "  ${DIM}%-10s${NC} ${CYAN}127.0.0.1:${API_PORT}${NC}\n" "API 控制"
+        printf "  ${DIM}%-10s${NC} ${CYAN}$(ui_url)${NC}\n" "管理面板"
+        echo ""
+    else
+        err "启动失败"
+        dim "查看日志: tail $LOG_FILE"
         rm -f "$PID_FILE"
+        return 1
     fi
-
-    # 2. 查找并清理 mihomo 创建的高编号 TUN 设备（如 utun1024+）
-    #    系统默认 utun0~utun6，高编号的通常是 mihomo/VPN 所创
-    local tun_list=$(ifconfig -l 2>/dev/null)
-    for dev in ${(s: :)tun_list}; do
-        [[ "$dev" != utun* ]] && continue
-        local idx="${dev#utun}"
-        # 确保是纯数字
-        [[ "$idx" != <-> ]] && continue
-        # 只处理高编号（>=1024）的 utun 设备
-        if (( idx >= 1024 )); then
-            $verbose && echo -n "  ${ICON_INFO} 清理 TUN: $dev ... "
-            sudo ifconfig "$dev" down 2>/dev/null
-            sudo ifconfig "$dev" destroy 2>/dev/null
-            $verbose && echo "已移除"
-        fi
-    done
-
-    # 3. 关闭系统 HTTP/SOCKS 代理（如果指向 127.0.0.1:7890）
-    local iface=""
-    for candidate in $(networksetup -listallnetworkservices 2>/dev/null | tail -n +2); do
-        local clean=$(echo "$candidate" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        local proxy_server=$(networksetup -getwebproxy "$clean" 2>/dev/null | grep "^Server:" | awk '{print $2}')
-        local proxy_port=$(networksetup -getwebproxy "$clean" 2>/dev/null | grep "^Port:" | awk '{print $2}')
-        if [[ "$proxy_server" == "127.0.0.1" && "$proxy_port" == "$MIXED_PORT" ]]; then
-            iface="$clean"
-            break
-        fi
-    done
-    if [[ -n "$iface" ]]; then
-        $verbose && echo -n "  ${ICON_INFO} 关闭系统代理 ($iface) ... "
-        sudo networksetup -setwebproxystate "$iface" off 2>/dev/null
-        sudo networksetup -setsocksfirewallproxystate "$iface" off 2>/dev/null
-        $verbose && echo "已关闭"
-    fi
-
-    # 4. 刷新 DNS 缓存
-    $verbose && echo -n "  ${ICON_INFO} 刷新 DNS 缓存 ... "
-    sudo dscacheutil -flushcache 2>/dev/null
-    sudo killall -HUP mDNSResponder 2>/dev/null
-    $verbose && echo "完成"
-
-    # 5. 还原系统 DNS 设置（如果 mihomo 改了 DNS）
-    #    mihomo TUN 模式通过 scutil 改系统 DNS，检查并还原
-    local primary_dns=$(scutil --dns 2>/dev/null | grep "nameserver\[" | head -1 | awk '{print $3}')
-    if [[ "$primary_dns" == "127.0.0.1" ]] || [[ "$primary_dns" == "198.18."* ]]; then
-        $verbose && echo -n "  ${ICON_INFO} 还原系统 DNS (当前: $primary_dns) ... "
-        sudo networksetup -setdnsservers "Wi-Fi" empty 2>/dev/null
-        sudo dscacheutil -flushcache 2>/dev/null
-        sudo killall -HUP mDNSResponder 2>/dev/null
-        $verbose && echo "已还原"
-    fi
-
-    $verbose && echo ""
-    $verbose && echo "  ${BOLD_GREEN}${ICON_OK} 网络已恢复${NC}"
 }
 
-# ========== 停止（带完整网络恢复）==========
-clash_stop() {
+# ========== 停止 ==========
+cmd_stop() {
     if ! is_running; then
-        echo "  ${YELLOW}${ICON_WARN} mihomo 没有在运行${NC}"
+        warn "mihomo 没有在运行"
+        # 进程没了但可能残留 TUN/路由/代理（例如被强杀），顺手清理
+        if network_leftovers; then
+            echo ""
+            info "检测到残留网络状态，正在清理 ..."
+            network_restore true
+            echo ""
+            network_health_check
+        fi
         return 0
     fi
 
     local pid=$(cat "$PID_FILE")
     echo ""
-    echo -n "  ${ICON_STOP} 停止中 ... "
-
-    # 先发 SIGTERM，让 mihomo 优雅退出（它会自动清理 TUN/路由/DNS）
+    echo -n "  停止中 ... "
     sudo kill "$pid" 2>/dev/null
 
-    # 等最多 5 秒，让它完成清理
     for i in {1..10}; do
         if ! pgrep -F "$PID_FILE" &>/dev/null 2>&1; then
-            echo "${BOLD_GREEN}已停止${NC}  ${DIM}(PID: $pid)${NC}"
-            echo "  ${DIM}已自动清理 TUN/路由/DNS${NC}"
+            ok "已停止 (PID: $pid)"
             rm -f "$PID_FILE"
             echo ""
-            # 依然做一次网络恢复（确保万无一失）
             network_restore false
             network_health_check
             return 0
@@ -340,273 +380,249 @@ clash_stop() {
         sleep 0.5
     done
 
-    # 超时了，强杀
-    echo "${BOLD_YELLOW}超时${NC}，强制终止..."
+    echo ""
+    warn "超时，强制终止..."
     sudo kill -9 "$pid" 2>/dev/null
     sleep 0.5
     rm -f "$PID_FILE"
 
     if pgrep -l mihomo >/dev/null 2>&1; then
-        echo "  ${BOLD_RED}停止失败${NC}，残留进程仍在运行"
-        echo "  ${DIM}试试: sudo pkill -9 mihomo${NC}"
+        err "停止失败，残留进程仍在运行"
+        dim "试试: sudo pkill -9 mihomo"
         return 1
     fi
 
-    echo "  ${BOLD_YELLOW}已强制停止${NC}"
-    # 强杀后 mihomo 来不及清理，主动恢复网络
-    echo "  ${ICON_INFO} 正在恢复网络 ..."
+    warn "已强制停止"
+    info "正在恢复网络 ..."
     network_restore true
     echo ""
     network_health_check
 }
 
-# ========== 清理/修复（alias）==========
-clash_cleanup() {
-    network_restore true
-}
-
-# ========== 重启 ==========
-clash_restart() {
-    clash_stop
+# ========== 重启 / 热重载 ==========
+cmd_restart() {
+    cmd_stop
     sleep 1
-    clash_start "$@"
+    cmd_start "$@"
 }
 
-# ========== 热重载 ==========
-clash_reload() {
+cmd_reload() {
     local cfg="${1:-$CONFIG_FILE}"
     if ! is_running; then
-        echo "${YELLOW}[!] mihomo 没在运行，直接启动${NC}"
-        clash_start "$cfg"
+        warn "mihomo 没在运行，直接启动"
+        cmd_start "$cfg"
         return $?
     fi
     if [[ ! -f "$cfg" ]]; then
-        echo "${RED}[!] 配置文件不存在: $cfg${NC}"
+        err "配置文件不存在: $cfg"
         return 1
     fi
-    echo ""
-    echo -n "  ${ICON_INFO} 热重载配置 ... "
-    curl -s -X PUT "http://127.0.0.1:${API_PORT}/configs" \
+    echo -n "  热重载配置 ... "
+    if curl -s -X PUT "http://127.0.0.1:${API_PORT}/configs" \
         -H "Content-Type: application/json" \
-        -d "{\"path\":\"${cfg}\"}" > /dev/null 2>&1
-    if [[ $? -eq 0 ]]; then
-        echo "${BOLD_GREEN}成功${NC}"
+        -d "{\"path\":\"${cfg}\"}" > /dev/null 2>&1; then
+        ok "成功"
     else
-        echo "${BOLD_RED}失败${NC}"
-        echo "  ${ICON_WARN} API 不可达，尝试重启..."
-        clash_restart "$cfg"
+        err "API 不可达，尝试重启..."
+        cmd_restart "$cfg"
     fi
 }
 
 # ========== 状态 ==========
-clash_status() {
+cmd_status() {
     if is_running; then
         local pid=$(cat "$PID_FILE")
         echo ""
-        echo "  ${BOLD_GREEN}● 运行中${NC}"
+        echo "  ${BOLD_GREEN}● 运行中${NC}  ${DIM}PID: $pid${NC}"
         echo "  $SEP"
-        printf "  ${DIM}%-12s${NC} %s\n" "PID" "$pid"
-        printf "  ${DIM}%-12s${NC} ${CYAN}127.0.0.1:${MIXED_PORT}${NC} (HTTP/SOCKS5)\n" "代理端口"
-        printf "  ${DIM}%-12s${NC} ${CYAN}127.0.0.1:${API_PORT}${NC}\n" "API 端口"
-        printf "  ${DIM}%-12s${NC} ${CYAN}http://127.0.0.1:${API_PORT}/ui${NC}\n" "管理面板"
-        printf "  ${DIM}%-12s${NC} %s\n" "配置文件" "$CONFIG_FILE"
-        printf "  ${DIM}%-12s${NC} %s\n" "日志文件" "$LOG_FILE"
+        printf "  ${DIM}%-10s${NC} ${CYAN}127.0.0.1:${MIXED_PORT}${NC} (HTTP/SOCKS5)\n" "代理端口"
+        printf "  ${DIM}%-10s${NC} ${CYAN}127.0.0.1:${API_PORT}${NC}\n" "API 端口"
+        printf "  ${DIM}%-10s${NC} ${CYAN}$(ui_url)${NC}\n" "管理面板"
+        printf "  ${DIM}%-10s${NC} %s\n" "配置文件" "$CONFIG_FILE"
+        printf "  ${DIM}%-10s${NC} %s\n" "日志文件" "$LOG_FILE"
         local src=$(cat "$LINK_FILE" 2>/dev/null || auto_detect_source 2>/dev/null)
-        [[ -n "$src" ]] && printf "  ${DIM}%-12s${NC} %s\n" "源文件" "$src"
+        [[ -n "$src" ]] && printf "  ${DIM}%-10s${NC} %s\n" "源文件" "$src"
         echo ""
     else
         echo ""
         echo "  ${BOLD_RED}○ 已停止${NC}"
         echo "  $SEP"
-        echo "  ${DIM}mihomo 当前未运行${NC}"
+        dim "mihomo 当前未运行"
         echo ""
         rm -f "$PID_FILE"
     fi
 }
 
-# ========== 导入配置（自动适配 macOS）==========
-clash_import() {
-    local src=""
-    echo ""
-    echo "  ${BOLD}──  导入配置  ──${NC}"
-    local current_src=$(cat "$LINK_FILE" 2>/dev/null || auto_detect_source)
-    echo "  ${ICON_INFO} 当前源: ${CYAN}${current_src:-${DIM}未检测到${NC}}"
-    echo ""
-    echo -n "  ${BOLD}❯${NC} 请输入 YAML 文件路径 ${DIM}(Enter 取消)${NC}: "
-    read src
-    if [[ -z "$src" ]]; then
-        echo "  ${YELLOW}${ICON_WARN} 已取消${NC}"
-        return 0
-    fi
-    # 去掉首尾空格和引号
-    src=$(echo "$src" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
-    if [[ ! -f "$src" ]]; then
-        echo "  ${BOLD_RED}${ICON_FAIL} 文件不存在: $src${NC}"
-        return 1
-    fi
-    # 记录源文件路径
-    echo "$src" > "$LINK_FILE"
-    # 适配并复制到 CONFIG_DIR
-    macos_adapt_config "$src" || return 1
-    echo ""
-    echo -n "  ${ICON_INFO} 立即启动? (y/n) "
-    read -q ans
-    echo ""
-    [[ "$ans" == "y" ]] && clash_start
-}
-
-# ========== 链接源配置 ==========
-# 设置共享 YAML 文件路径，启动时自动从该文件适配
-clash_link() {
+# ========== 链接源配置（查看/设置，合并原 import）==========
+cmd_link() {
     local src="${1:-}"
     if [[ -z "$src" ]]; then
         echo ""
-        echo "  ${BOLD}──  源文件链接  ──${NC}"
+        section "源文件链接"
         if [[ -f "$LINK_FILE" ]]; then
-            echo "  ${ICON_INFO} 当前链接: ${CYAN}$(cat "$LINK_FILE")${NC}"
+            info "当前链接: $(cat "$LINK_FILE")"
         else
             local detected=$(auto_detect_source)
             if [[ -n "$detected" ]]; then
-                echo "  ${ICON_INFO} 自动检测: ${CYAN}$detected${NC}"
+                info "自动检测: $detected"
             else
-                echo "  ${YELLOW}${ICON_WARN} 未检测到源文件${NC}"
-                echo "  ${DIM}请把 .yaml 文件放到 $SOURCE_DIR${NC}"
+                warn "未检测到源文件"
             fi
         fi
         echo ""
-        echo -n "  ${BOLD}❯${NC} 输入新的源文件路径 ${DIM}(Enter 不变)${NC}: "
+        echo -n "  请输入 YAML 文件路径 ${DIM}(Enter 取消)${NC}: "
         read src
-        [[ -z "$src" ]] && return 0
+        [[ -z "$src" ]] && { dim "已取消"; return 0; }
         src=$(echo "$src" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
     fi
+
     if [[ ! -f "$src" ]]; then
-        echo "  ${BOLD_RED}${ICON_FAIL} 文件不存在: $src${NC}"
+        err "文件不存在: $src"
         return 1
     fi
+
     echo "$src" > "$LINK_FILE"
+    ok "已链接"
+    dim "源文件   $src"
     echo ""
-    echo "  ${ICON_OK} ${GREEN}已链接${NC}"
-    echo "  $SEP"
-    printf "  ${DIM}%-12s${NC} ${CYAN}%s${NC}\n" "源文件" "$src"
-    echo "  $SEP"
-    echo ""
-    echo -n "  ${ICON_INFO} 立即适配并重启? (y/n) "
+    echo -n "  立即适配并启动? (y/n) "
     read -q ans
     echo ""
     if [[ "$ans" == "y" ]]; then
-        macos_adapt_config "$src"
+        macos_adapt_config "$src" || return 1
         if is_running; then
-            echo ""
-            echo -n "  ${ICON_INFO} 重启 mihomo? (y/n) "
-            read -q ans2
-            echo ""
-            [[ "$ans2" == "y" ]] && clash_restart
+            cmd_restart
+        else
+            cmd_start
         fi
     fi
 }
 
+# ========== 日志 / 编辑 / 面板 / 修复 / 诊断 ==========
+cmd_log() {
+    if [[ -f "$LOG_FILE" ]]; then
+        echo ""
+        section "实时日志  (Ctrl+C 退出)"
+        tail -f "$LOG_FILE"
+    else
+        warn "日志文件不存在"
+    fi
+}
+
+cmd_edit() {
+    info "打开编辑器: $CONFIG_FILE"
+    ${EDITOR:-vim} "$CONFIG_FILE"
+}
+
+cmd_open() {
+    if is_running; then
+        ensure_ui_index
+        local url=$(ui_url)
+        open "$url"
+        ok "已打开管理面板"
+        dim "$url"
+    else
+        warn "mihomo 未运行，请先启动"
+    fi
+}
+
+cmd_cleanup() {
+    network_restore true
+}
+
+cmd_doctor() {
+    network_health_check
+}
+
 # ========== 关闭 Clash Verge 后台服务 ==========
-clash_verge_off() {
+cmd_verge_off() {
     echo ""
-    echo "  ${BOLD}──  关闭 Clash Verge  ──${NC}"
+    section "关闭 Clash Verge"
     local svc_pid=$(pgrep -f "clash-verge-service" 2>/dev/null)
     if [[ -n "$svc_pid" ]]; then
-        echo "  ${ICON_INFO} 发现 Clash Verge 服务 ${DIM}(PID: $svc_pid)${NC}"
-        echo -n "  ${ICON_STOP} 正在停止 ... "
+        info "发现 Clash Verge 服务 (PID: $svc_pid)"
+        echo -n "  正在停止 ... "
         sudo kill "$svc_pid" 2>/dev/null
         sleep 1
         if pgrep -f "clash-verge-service" >/dev/null 2>&1; then
             sudo kill -9 "$svc_pid" 2>/dev/null
         fi
-        echo "${GREEN}已停止${NC}"
+        ok "已停止"
     else
-        echo "  ${ICON_OK} Clash Verge 服务未运行"
+        ok "Clash Verge 服务未运行"
     fi
 
     echo ""
-    echo -n "  ${ICON_INFO} 是否同时卸载开机自启? (y/n) "
+    echo -n "  是否同时卸载开机自启? (y/n) "
     read -q ans
     echo ""
     if [[ "$ans" == "y" ]]; then
         sudo /bin/launchctl unload /Library/LaunchDaemons/io.github.clash-verge-rev.clash-verge-rev.plist 2>/dev/null
-        echo "  ${ICON_OK} ${GREEN}已卸载开机自启${NC}"
+        ok "已卸载开机自启"
     fi
     echo ""
-    echo "  ${PURPLE}╭────────────────────────────────────╮${NC}"
-    echo "  ${PURPLE}│${NC}  ${BOLD}现在可以纯用 clash 脚本管理了${NC}   ${PURPLE}│${NC}"
-    echo "  ${PURPLE}╰────────────────────────────────────╯${NC}"
+    ok "现在可以纯用 clash 脚本管理了"
     echo ""
 }
 
-# ========== 日志 ==========
-clash_log() {
-    if [[ -f "$LOG_FILE" ]]; then
-        echo ""
-        echo "  ${BOLD}──  实时日志  ──${NC}  ${DIM}(Ctrl+C 退出)${NC}"
-        echo "  $SEP"
-        tail -f "$LOG_FILE"
-    else
-        echo "  ${YELLOW}${ICON_WARN} 日志文件不存在${NC}"
-    fi
-}
-
-# ========== 编辑配置 ==========
-clash_edit() {
+# ========== 帮助 ==========
+show_help() {
     echo ""
-    echo "  ${ICON_INFO} 打开编辑器: ${CYAN}$CONFIG_FILE${NC}"
-    ${EDITOR:-vim} "$CONFIG_FILE"
-}
-
-# ========== 打开面板 ==========
-clash_open() {
-    if is_running; then
-        open "http://127.0.0.1:${API_PORT}/ui"
-        echo ""
-        echo "  ${ICON_OK} 已打开管理面板"
-        echo "  ${DIM}${CYAN}http://127.0.0.1:${API_PORT}/ui${NC}"
-        echo ""
-    else
-        echo "  ${YELLOW}${ICON_WARN} mihomo 未运行，请先启动${NC}"
-    fi
+    echo "  ${BOLD_PURPLE}Mihomo Kernel Manager${NC}  ${DIM}— macOS${NC}"
+    echo "  $SEP"
+    echo ""
+    echo "  ${BOLD}用法:${NC}"
+    echo "    ${CYAN}clash <command>${NC}   执行子命令"
+    echo "    ${CYAN}clash${NC}             进入交互菜单"
+    echo "    ${CYAN}clash help${NC}        显示本帮助"
+    echo ""
+    echo "  ${BOLD}核心:${NC}"
+    printf "    ${CYAN}%-14s${NC} %s\n" "start [file]" "启动（自动适配 macOS 配置）"
+    printf "    ${CYAN}%-14s${NC} %s\n" "stop" "停止并恢复网络"
+    printf "    ${CYAN}%-14s${NC} %s\n" "restart" "重启"
+    printf "    ${CYAN}%-14s${NC} %s\n" "status" "查看运行状态"
+    printf "    ${CYAN}%-14s${NC} %s\n" "reload [file]" "热重载配置"
+    printf "    ${CYAN}%-14s${NC} %s\n" "open" "打开管理面板"
+    printf "    ${CYAN}%-14s${NC} %s\n" "log" "实时日志"
+    echo ""
+    echo "  ${BOLD}配置:${NC}"
+    printf "    ${CYAN}%-14s${NC} %s\n" "link [file]" "查看/设置源 YAML（含原 import）"
+    printf "    ${CYAN}%-14s${NC} %s\n" "edit" "编辑当前配置"
+    echo ""
+    echo "  ${BOLD}网络:${NC}"
+    printf "    ${CYAN}%-14s${NC} %s\n" "cleanup" "网络修复（清理残留 TUN/路由/代理/DNS）"
+    printf "    ${CYAN}%-14s${NC} %s\n" "doctor" "网络诊断"
+    echo ""
+    echo "  ${BOLD}系统:${NC}"
+    printf "    ${CYAN}%-14s${NC} %s\n" "verge-off" "关闭 Clash Verge 后台服务"
+    echo ""
+    echo "  ${BOLD}示例:${NC}"
+    dim "clash start"
+    dim "clash link ~/Mihomo/config.yaml"
+    dim "clash cleanup"
+    echo ""
 }
 
 # ========== 交互菜单 ==========
 show_menu() {
     clear
-
-    # ── Mihomo ASCII Banner ──
     echo ""
-    echo "  ${BOLD_PURPLE}███╗   ███╗██╗██╗  ██╗ ██████╗ ███╗   ███╗ ██████╗ ${NC}"
-    echo "  ${BOLD_PURPLE}████╗ ████║██║██║  ██║██╔═══██╗████╗ ████║██╔═══██╗${NC}"
-    echo "  ${BOLD_PURPLE}██╔████╔██║██║███████║██║   ██║██╔████╔██║██║   ██║${NC}"
-    echo "  ${BOLD_PURPLE}██║╚██╔╝██║██║██╔══██║██║   ██║██║╚██╔╝██║██║   ██║${NC}"
-    echo "  ${BOLD_PURPLE}██║ ╚═╝ ██║██║██║  ██║╚██████╔╝██║ ╚═╝ ██║╚██████╔╝${NC}"
-    echo "  ${BOLD_PURPLE}╚═╝     ╚═╝╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝ ╚═════╝ ${NC}"
-    echo "  ${DIM}┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈${NC}"
+    echo "  ${BOLD_PURPLE}Mihomo Kernel Manager${NC}  ${DIM}— macOS${NC}"
+    echo "  $SEP"
 
-    # ── 状态栏 ──
-    local pid_str=""
     if is_running; then
-        printf "  ${BOLD_GREEN}● 运行中${NC}  ${DIM}PID: %s${NC}  ${DIM}端口: %s${NC}  ${DIM}API: %s${NC}\n" \
-            "$(cat "$PID_FILE" 2>/dev/null)" \
-            "${MIXED_PORT}" \
-            "${API_PORT}"
+        printf "  ${BOLD_GREEN}● 运行中${NC}  ${DIM}PID: %s${NC}  ${DIM}代理: %s${NC}  ${DIM}API: %s${NC}\n" \
+            "$(cat "$PID_FILE" 2>/dev/null)" "${MIXED_PORT}" "${API_PORT}"
     else
         echo "  ${BOLD_RED}○ 已停止${NC}"
     fi
     echo ""
 
-    # ── 菜单面板 ──
-    echo "  ${BOLD}╔══════════════════════════════════════════════╗${NC}"
-    echo "  ${BOLD}║${NC}  ${CYAN}1${NC}  ${WHITE}启动${NC}                    ${CYAN}6${NC}  ${WHITE}实时日志${NC}        ${BOLD}║${NC}"
-    echo "  ${BOLD}║${NC}  ${CYAN}2${NC}  ${WHITE}停止${NC}                    ${CYAN}7${NC}  ${WHITE}导入配置${NC}        ${BOLD}║${NC}"
-    echo "  ${BOLD}║${NC}  ${CYAN}3${NC}  ${WHITE}重启${NC}                    ${CYAN}8${NC}  ${WHITE}管理面板${NC}        ${BOLD}║${NC}"
-    echo "  ${BOLD}║${NC}  ${CYAN}4${NC}  ${WHITE}热重载                   ${CYAN}9${NC}  ${WHITE}编辑配置${NC}        ${BOLD}║${NC}"
-    echo "  ${BOLD}║${NC}  ${CYAN}5${NC}  ${WHITE}运行状态                   ${PURPLE}L${NC}  ${WHITE}源文件链接${NC}      ${BOLD}║${NC}"
-    echo "  ${BOLD}║${NC}                                       ${BOLD}║${NC}"
-    echo "  ${BOLD}║${NC}  ${YELLOW}R${NC}  ${WHITE}网络修复${NC}                                    ${BOLD}║${NC}"
-    echo "  ${BOLD}║${NC}  ${RED}0${NC}  ${WHITE}退出${NC}                                         ${BOLD}║${NC}"
-    echo "  ${BOLD}╚══════════════════════════════════════════════╝${NC}"
+    echo "  ${BOLD}1${NC} 启动        ${BOLD}5${NC} 状态"
+    echo "  ${BOLD}2${NC} 停止        ${BOLD}6${NC} 实时日志"
+    echo "  ${BOLD}3${NC} 打开面板    ${BOLD}7${NC} 热重载"
+    echo "  ${BOLD}4${NC} 重启        ${BOLD}8${NC} 网络修复"
+    echo "  ${BOLD}0${NC} 退出"
     echo ""
     echo -n "  ${BOLD}❯${NC} "
 }
@@ -617,28 +633,20 @@ interactive_menu() {
         read choice
         echo ""
         case "$choice" in
-            1) clash_start ;;
-            2) clash_stop ;;
-            3) clash_restart ;;
-            4) clash_reload ;;
-            5) clash_status ;;
-            6) clash_log ;;
-            7) clash_import ;;
-            8) clash_open ;;
-            9) clash_edit ;;
-            l|L) clash_link ;;
-
-            r|R) clash_cleanup ;;
+            1) cmd_start ;;
+            2) cmd_stop ;;
+            3) cmd_open ;;
+            4) cmd_restart ;;
+            5) cmd_status ;;
+            6) cmd_log ;;
+            7) cmd_reload ;;
+            8) cmd_cleanup ;;
             0|q|Q)
-                echo ""
-                echo "  ${PURPLE}╭──────────────────────────╮${NC}"
-                echo "  ${PURPLE}│${NC}  ${BOLD}期待下次相遇 👋${NC}        ${PURPLE}│${NC}"
-                printf "  ${PURPLE}│${NC}  ${DIM}%s${NC}  ${PURPLE}│${NC}\n" "Mihomo $(date +%H:%M)"
-                echo "  ${PURPLE}╰──────────────────────────╯${NC}"
+                echo "  ${DIM}再见 👋${NC}"
                 echo ""
                 break
                 ;;
-            *)  echo "  ${YELLOW}${ICON_WARN} 无效选项，请输入 0-9 或 L/R${NC}" ;;
+            *) warn "无效选项，请输入 0-8" ;;
         esac
         echo ""
         echo -n "  按 Enter 返回菜单..."
@@ -648,37 +656,18 @@ interactive_menu() {
 
 # ========== 入口 ==========
 case "${1:-}" in
-    start)   clash_start "$2" ;;
-    stop)    clash_stop ;;
-    restart) clash_restart "$2" ;;
-    reload)  clash_reload "$2" ;;
-    status)  clash_status ;;
-    log)     clash_log ;;
-    import)  clash_import ;;
-    link)    clash_link "$2" ;;
-    open)    clash_open ;;
-    edit)    clash_edit ;;
-    cleanup) clash_cleanup ;;
-    menu|-h|--help|help)
-        echo ""
-        echo "  ${BOLD_PURPLE}Mihomo Kernel Manager${NC}  ${DIM}— macOS${NC}"
-        echo "  $SEP"
-        echo ""
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash" "进入交互菜单"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash start" "启动（自动从源文件适配 macOS）"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash start <文件>" "从指定文件启动"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash stop" "停止"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash restart" "重启"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash reload" "热重载配置"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash status" "查看运行状态"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash log" "查看实时日志"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash import" "导入/链接配置文件"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash link" "查看/设置源 YAML 路径"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash verge-off" "关闭 Clash Verge 服务"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash open" "打开管理面板"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash edit" "编辑当前配置"
-        printf "  ${CYAN}%-20s${NC}  %s\n" "clash cleanup" "网络修复/清理残留"
-        echo ""
-        ;;
-    *)  interactive_menu ;;
+    start|s)     cmd_start "$2" ;;
+    stop)        cmd_stop ;;
+    restart|r)   cmd_restart "$2" ;;
+    reload|rl)   cmd_reload "$2" ;;
+    status|st)   cmd_status ;;
+    log|l)       cmd_log ;;
+    link|lk)     cmd_link "$2" ;;
+    open|o)      cmd_open ;;
+    edit|e)      cmd_edit ;;
+    cleanup|c)   cmd_cleanup ;;
+    doctor|d)    cmd_doctor ;;
+    verge-off)   cmd_verge_off ;;
+    help|-h|--help|h) show_help ;;
+    *) interactive_menu ;;
 esac
