@@ -168,8 +168,8 @@ function Test-NetworkLeftovers {
         Where-Object { $_.InterfaceDescription -like "*Wintun*" -or $_.InterfaceDescription -like "*Mihomo*" }
     if ($adapters) { return $true }
 
-    # 3. 残留路由（指向 198.18.0.1）
-    $routes = Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -eq "198.18.0.1" }
+    # 3. 残留路由（网关落在 198.18.x fake-IP 段）
+    $routes = Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -match '^198\.18\.' }
     if ($routes) { return $true }
 
     # 4. DNS 劫持（指向 127.0.0.1 或 198.18.x）
@@ -196,20 +196,23 @@ function Invoke-NetworkRestore {
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
 
-    # 2. 清理残留 wintun 网卡
+    # 2. 清理残留 wintun 网卡 + 其上的全部路由
     $adapters = Get-NetAdapter -ErrorAction SilentlyContinue |
         Where-Object { $_.InterfaceDescription -like "*Wintun*" -or $_.InterfaceDescription -like "*Mihomo*" }
     foreach ($adapter in $adapters) {
         if ($ShowProgress) { Write-Host -NoNewline "  清理残留 TUN $($adapter.Name) ... " }
+        # 删除该网卡上的所有路由（不限网段），避免黑洞残留
+        Get-NetRoute -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue |
+            Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
         netsh interface set interface "$($adapter.Name)" admin=disable 2>$null | Out-Null
         if ($ShowProgress) { Write-Host "${Green}✓${NC}" }
     }
 
-    # 3. 清理残留路由
+    # 3. 清理残留路由（网关落在 198.18.x fake-IP 段的，无条件删除）
     $mihomoRoutes = Get-NetRoute -ErrorAction SilentlyContinue |
-        Where-Object { $_.NextHop -eq "198.18.0.1" }
+        Where-Object { $_.NextHop -match '^198\.18\.' }
     foreach ($route in $mihomoRoutes) {
-        Remove-NetRoute -DestinationPrefix $route.DestinationPrefix -NextHop "198.18.0.1" -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-NetRoute -DestinationPrefix $route.DestinationPrefix -NextHop $route.NextHop -Confirm:$false -ErrorAction SilentlyContinue
     }
 
     # 4. 刷新 DNS 缓存
@@ -399,6 +402,8 @@ function Invoke-CmdStop {
     Write-Host ""
     W-Warn "超时，强制终止..."
     Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+    # 兜底：按进程名强杀，防止 PID 文件不准导致杀不掉
+    Get-Process -Name mihomo -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 

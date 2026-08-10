@@ -142,10 +142,10 @@ network_leftovers() {
         [[ "$dev" != utun* ]] && continue
         local idx="${dev#utun}"
         [[ "$idx" != <-> ]] && continue
-        if ifconfig "$dev" 2>/dev/null | grep -q "inet 198.18.0.1 "; then
+        if ifconfig "$dev" 2>/dev/null | grep -qE "inet 198\.18\."; then
             return 0
         fi
-        if netstat -rn -f inet 2>/dev/null | grep -qE "198\.18\.0\.1[[:space:]]+.*[[:space:]]+$dev"; then
+        if netstat -rn -f inet 2>/dev/null | grep -qE "198\.18\.[[:space:]]+.*[[:space:]]+$dev"; then
             return 0
         fi
         (( idx >= 1024 )) && return 0
@@ -181,16 +181,19 @@ network_restore() {
         rm -f "$PID_FILE"
     fi
 
-    # 2. 清理 mihomo 残留 TUN（按 fake-IP 网关 198.18.0.1 / 路由特征识别，
-    #    macOS 上 mihomo 常创建 utun7/utun8 这类低编号，不能只认 >=1024）
+    # 2. 清理 mihomo 残留 TUN / 全量劫持路由
+    #    放宽识别：fake-IP 网关只要是 198.18.x 段都算（不限于 198.18.0.1），
+    #    并无条件删除 0.0.0.0/1 + 128.0.0.0/1 这两条黑洞路由，防止残留导致断网
     local tun_list=$(ifconfig -l 2>/dev/null)
-    local route_devs=$(netstat -rn -f inet 2>/dev/null | awk '$2=="198.18.0.1" && $4 ~ /^utun[0-9]+$/ {print $4}' | sort -u)
+    # fake-IP 网关段（默认 198.18.x，放宽不再只认 198.18.0.1）
+    local fake_gws=$(netstat -rn -f inet 2>/dev/null | awk '$4 ~ /^utun[0-9]+$/ && $2 ~ /^198\.18\./ {print $2}' | sort -u)
+    local route_devs=$(netstat -rn -f inet 2>/dev/null | awk '$4 ~ /^utun[0-9]+$/ && $2 ~ /^198\.18\./ {print $4}' | sort -u)
     local mihomo_tuns=""
     for dev in ${(s: :)tun_list}; do
         [[ "$dev" != utun* ]] && continue
         local idx="${dev#utun}"
         [[ "$idx" != <-> ]] && continue
-        if ifconfig "$dev" 2>/dev/null | grep -q "inet 198.18.0.1 "; then
+        if ifconfig "$dev" 2>/dev/null | grep -qE "inet 198\.18\."; then
             mihomo_tuns+=" $dev"
             continue
         fi
@@ -200,11 +203,19 @@ network_restore() {
         fi
         (( idx >= 1024 )) && mihomo_tuns+=" $dev"
     done
+
+    # 无条件清理全量劫持路由（0.0.0.0/1 + 128.0.0.0/1），几乎必定是 mihomo 创建
+    for gw in ${(s: :)fake_gws}; do
+        sudo route -n delete -net 0.0.0.0/1 "$gw" 2>/dev/null
+        sudo route -n delete -net 128.0.0.0/1 "$gw" 2>/dev/null
+        sudo route -n delete -net 198.18.0.0/16 "$gw" 2>/dev/null
+    done
+    # 兜底：常见默认网关组合，防止识别遗漏留下黑洞
+    sudo route -n delete -net 0.0.0.0/1 198.18.0.1 2>/dev/null
+    sudo route -n delete -net 128.0.0.0/1 198.18.0.1 2>/dev/null
+
     for dev in ${(s: :)mihomo_tuns}; do
         $verbose && echo -n "  清理残留 TUN $dev ... "
-        sudo route -n delete -net 0.0.0.0/1 198.18.0.1 2>/dev/null
-        sudo route -n delete -net 128.0.0.0/1 198.18.0.1 2>/dev/null
-        sudo route -n delete -net 198.18.0.0/16 198.18.0.1 2>/dev/null
         sudo ifconfig "$dev" down 2>/dev/null
         sudo ifconfig "$dev" destroy 2>/dev/null
         $verbose && echo "${GREEN}✓${NC}"
@@ -329,8 +340,11 @@ cmd_start() {
     echo ""
     echo -n "  启动中 ... "
     nohup sudo "$MIHOMO_BIN" -d "$CONFIG_DIR" -f "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
-    echo $! > "$PID_FILE"
+    local sudo_pid=$!
     sleep 1
+    # 解析 mihomo 真实 PID（sudo 的子进程），PID 文件记它，stop 才能精确杀
+    local mihomo_pid=$(pgrep -P "$sudo_pid" 2>/dev/null | head -1)
+    echo "${mihomo_pid:-$sudo_pid}" > "$PID_FILE"
 
     if is_running; then
         ok "已就绪"
@@ -366,11 +380,13 @@ cmd_stop() {
     local pid=$(cat "$PID_FILE")
     echo ""
     echo -n "  停止中 ... "
-    sudo kill "$pid" 2>/dev/null
+    # 直接给 mihomo 发 SIGTERM（PID 文件记的是 sudo，按进程名杀最稳）
+    sudo pkill -TERM -x mihomo 2>/dev/null
+    sudo kill "$pid" 2>/dev/null   # 兜底：也通知 sudo 进程
 
     for i in {1..10}; do
-        if ! pgrep -F "$PID_FILE" &>/dev/null 2>&1; then
-            ok "已停止 (PID: $pid)"
+        if ! pgrep -x mihomo >/dev/null 2>&1; then
+            ok "已停止"
             rm -f "$PID_FILE"
             echo ""
             network_restore false
@@ -382,11 +398,11 @@ cmd_stop() {
 
     echo ""
     warn "超时，强制终止..."
-    sudo kill -9 "$pid" 2>/dev/null
+    sudo pkill -9 -x mihomo 2>/dev/null
     sleep 0.5
     rm -f "$PID_FILE"
 
-    if pgrep -l mihomo >/dev/null 2>&1; then
+    if pgrep -x mihomo >/dev/null 2>&1; then
         err "停止失败，残留进程仍在运行"
         dim "试试: sudo pkill -9 mihomo"
         return 1
