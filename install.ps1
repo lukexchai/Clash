@@ -118,8 +118,9 @@ if ($needDownload) {
     W-Step "解压中 ..."
     Expand-Archive -Path $mihomoZip -DestinationPath $tempDir.FullName -Force
 
-    # 找到 mihomo.exe 并复制
-    $extracted = Get-ChildItem $tempDir.FullName -Recurse -Filter "mihomo.exe" | Select-Object -First 1
+    # 找到 mihomo 可执行文件并复制（官方 zip 内名为 mihomo-windows-amd64-v1.exe）
+    $extracted = Get-ChildItem $tempDir.FullName -Recurse -Filter "*.exe" |
+        Where-Object { $_.Name -like "mihomo*" } | Select-Object -First 1
     if ($extracted) {
         Copy-Item $extracted.FullName $mihomoExe -Force
         W-Done "mihomo.exe 已安装"

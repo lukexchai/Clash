@@ -443,9 +443,16 @@ function Invoke-CmdReload {
 
     Write-Host -NoNewline "  热重载配置 ... "
     try {
+        # mihomo API 开启 secret 时必须带 Bearer 鉴权，否则 PUT /configs 会 401
+        $headers = @{}
+        if (Test-Path $Cfg) {
+            $secLine = Select-String -Path $Cfg -Pattern '^\s*secret:\s*"([^"]+)"' | Select-Object -First 1
+            if (-not $secLine) { $secLine = Select-String -Path $Cfg -Pattern '^\s*secret:\s*([^\s#]+)' | Select-Object -First 1 }
+            if ($secLine) { $headers['Authorization'] = "Bearer $($secLine.Matches[0].Groups[1].Value)" }
+        }
         $body = @{ path = $Cfg } | ConvertTo-Json -Compress
         $uri = "http://127.0.0.1:$ApiPort/configs"
-        $resp = Invoke-WebRequest -Method PUT -Uri $uri -ContentType "application/json" -Body $body -UseBasicParsing -ErrorAction Stop
+        $resp = Invoke-WebRequest -Method PUT -Uri $uri -ContentType "application/json" -Body $body -Headers $headers -UseBasicParsing -ErrorAction Stop
         W-Ok "成功"
     } catch {
         W-Err "API 不可达，尝试重启..."
