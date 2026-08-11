@@ -444,10 +444,21 @@ function Invoke-CmdReload {
     Write-Host -NoNewline "  热重载配置 ... "
     try {
         # mihomo API 开启 secret 时必须带 Bearer 鉴权，否则 PUT /configs 会 401
+        # BUGFIX: 旧逻辑只处理双引号和裸值，漏了单引号（secret: 'xxx'）
+        # 且 fallback 正则会连引号一起捕获导致鉴权失败
+        # 现在三级 fallback：双引号 → 单引号 → 裸值，每级精确匹配不吞引号
         $headers = @{}
         if (Test-Path $Cfg) {
+            # 匹配双引号: secret: "mysecret"
             $secLine = Select-String -Path $Cfg -Pattern '^\s*secret:\s*"([^"]+)"' | Select-Object -First 1
-            if (-not $secLine) { $secLine = Select-String -Path $Cfg -Pattern '^\s*secret:\s*([^\s#]+)' | Select-Object -First 1 }
+            if (-not $secLine) {
+                # 匹配单引号: secret: 'mysecret'
+                $secLine = Select-String -Path $Cfg -Pattern "^\s*secret:\s*'([^']+)'" | Select-Object -First 1
+            }
+            if (-not $secLine) {
+                # 匹配裸值: secret: mysecret
+                $secLine = Select-String -Path $Cfg -Pattern '^\s*secret:\s*([^\s#]+)' | Select-Object -First 1
+            }
             if ($secLine) { $headers['Authorization'] = "Bearer $($secLine.Matches[0].Groups[1].Value)" }
         }
         $body = @{ path = $Cfg } | ConvertTo-Json -Compress
@@ -503,9 +514,11 @@ function Invoke-CmdLink {
             }
         }
         Write-Host ""
-        $input = Read-Host "  请输入 YAML 文件路径 (Enter 取消)"
-        if (-not $input) { W-Dim "已取消"; return }
-        $Src = $input.Trim().Trim('"')
+        # BUGFIX: $input 是 PowerShell 自动变量（包含管道输入），不能当普通变量使用
+        # 旧代码用 $input 存储用户输入会导致意外行为，改为 $inputPath
+        $inputPath = Read-Host "  请输入 YAML 文件路径 (Enter 取消)"
+        if (-not $inputPath) { W-Dim "已取消"; return }
+        $Src = $inputPath.Trim().Trim('"')
     }
 
     if (-not (Test-Path $Src)) {

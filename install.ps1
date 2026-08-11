@@ -110,7 +110,7 @@ if ($needDownload) {
     } catch {
         W-Fail "下载失败: $_"
         W-Note "手动下载: $mihomoUrl"
-        W-Note "解压 mihomo.exe 到: $InstallDir"
+        W-Note "解压 mihomo 可执行文件到: $InstallDir"   # BUGFIX: 提示文案从 "mihomo.exe" 改为 "mihomo 可执行文件"，因为 zip 内文件名不是 mihomo.exe
         exit 1
     }
 
@@ -118,14 +118,17 @@ if ($needDownload) {
     W-Step "解压中 ..."
     Expand-Archive -Path $mihomoZip -DestinationPath $tempDir.FullName -Force
 
-    # 找到 mihomo 可执行文件并复制（官方 zip 内名为 mihomo-windows-amd64-v1.exe）
+    # 找到 mihomo 可执行文件并复制
+    # BUGFIX: 官方 zip 内二进制名为 mihomo-windows-amd64-v1.exe，不是 mihomo.exe
+    # 旧逻辑用 -Filter "mihomo.exe" 精确匹配会找不到，改用 *.exe 通配 + like "mihomo*" 模糊匹配
+    # 这样对 amd64(v1/compatible)、arm64 等所有架构变体都有效
     $extracted = Get-ChildItem $tempDir.FullName -Recurse -Filter "*.exe" |
         Where-Object { $_.Name -like "mihomo*" } | Select-Object -First 1
     if ($extracted) {
         Copy-Item $extracted.FullName $mihomoExe -Force
         W-Done "mihomo.exe 已安装"
     } else {
-        W-Fail "未在压缩包中找到 mihomo.exe"
+        W-Fail "未在压缩包中找到 mihomo 可执行文件"   # BUGFIX: 同上，提示文案从 "mihomo.exe" 改为 "mihomo 可执行文件"
         exit 1
     }
 
