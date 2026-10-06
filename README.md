@@ -20,7 +20,7 @@
 ### 部署
 
 ```bash
-git clone git@github.com:lukeopen/Clash.git
+git clone git@github.com:lukexchai/Clash.git
 cd Clash && zsh install.sh
 cp /path/to/config.yaml ~/Mihomo/
 clash start
@@ -48,7 +48,7 @@ clash start
 ### 部署
 
 ```powershell
-git clone https://github.com/lukeopen/Clash.git
+git clone https://github.com/lukexchai/Clash.git
 cd Clash
 pwsh install.ps1
 # 把 .yaml 配置文件放入 ~/Mihomo/
